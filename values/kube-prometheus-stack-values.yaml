@@ -1,0 +1,172 @@
+---
+# kube-prometheus-stack — homelab profile
+# 7-day retention, modest resources, Grafana exposed via in-cluster ClusterIP only
+# (the Tailscale Ingress is in k8s/grafana-ingress.yaml).
+
+fullnameOverride: kps
+
+# --- Prometheus ---
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    retentionSize: "15GB"
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "100m"
+      limits:
+        memory: "2Gi"
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 20Gi
+    # Pick up ServiceMonitors / PodMonitors from any namespace, not only ones
+    # labelled with our helm release. Lets us drop a ServiceMonitor next to any
+    # app and have it scraped automatically.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+# --- Alertmanager (installed but no notifications wired) ---
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "10m"
+      limits:
+        memory: "256Mi"
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+
+# --- Grafana ---
+grafana:
+  fullnameOverride: grafana
+  # Admin password is managed via a Kubernetes Secret (grafana-admin-secret).
+  # See deploy.sh — it creates the secret from .env before helm runs.
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+  defaultDashboardsTimezone: Europe/London
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 5Gi
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+  # The init-chown-data busybox container fails on OrbStack k3s with
+  # "Permission denied" (overlay/seccomp quirk). fsGroup: 472 already handles
+  # mount-time ownership, so the chown step is redundant.
+  initChownData:
+    enabled: false
+  # Harden sqlite under load: WAL journal + 30s busy timeout
+  # (Grafana 13's "k8s dashboard cleanup" + live websocket can otherwise wedge
+  # sqlite into SQLITE_BUSY loops when dashboards/datasources are being
+  # provisioned at the same time. See:
+  # https://github.com/grafana/grafana/issues/65057)
+  grafana.ini:
+    database:
+      wal: true
+      query_retries: 5
+      transaction_retries: 5
+      locking_attempt_timeout_sec: 30
+    live:
+      max_connections: 50   # default 100 — we don't need that many
+    feature_toggles:
+      # Disable the unified-storage cleanup loop that's the main sqlite hog
+      kubernetesClientDashboardsFolders: false
+      unifiedStorage: false
+    log:
+      level: warn
+  # Loki is wired in as a sidecar-discovered datasource (see loki-values.yaml).
+  # The sidecar watches ConfigMaps with grafana_datasource=1 label.
+  sidecar:
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      labelValue: "1"
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  # Pre-imported community dashboards
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+  dashboards:
+    default:
+      k8s-views-global:
+        gnetId: 15757
+        revision: 43
+        datasource: Prometheus
+      k8s-views-namespaces:
+        gnetId: 15758
+        revision: 38
+        datasource: Prometheus
+      k8s-views-nodes:
+        gnetId: 15759
+        revision: 37
+        datasource: Prometheus
+      k8s-views-pods:
+        gnetId: 15760
+        revision: 36
+        datasource: Prometheus
+      node-exporter-full:
+        gnetId: 1860
+        revision: 41
+        datasource: Prometheus
+      loki-logs-by-pod:
+        gnetId: 15141
+        revision: 1
+        datasource: Loki
+
+# --- Exporters ---
+nodeExporter:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+kube-state-metrics:
+  resources:
+    requests:
+      memory: "32Mi"
+      cpu: "10m"
+
+# --- Disable scrape targets that don't exist on OrbStack k3s ---
+# k3s consolidates controller-manager / scheduler / etcd / kube-proxy into
+# the single server binary; the discrete endpoints/services aren't there.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false

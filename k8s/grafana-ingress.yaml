@@ -1,0 +1,18 @@
+---
+# Tailscale HTTPS Ingress for Grafana
+# Result: https://${GRAFANA_INGRESS_HOST}.${TAILNET_DOMAIN} (from any tailnet device)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: ${MONITORING_NAMESPACE}
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: grafana
+      port:
+        number: 80
+  tls:
+    - hosts:
+        - ${GRAFANA_INGRESS_HOST}

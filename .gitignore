@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+
+# Temporary envsubst output files
+/tmp/kps-values.yaml
+/tmp/alloy-values.yaml
