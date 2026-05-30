@@ -7,3 +7,7 @@
 # Temporary envsubst output files
 /tmp/kps-values.yaml
 /tmp/alloy-values.yaml
+.code-review-graph/
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/cost.json
