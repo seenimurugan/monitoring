@@ -2,6 +2,8 @@
 
 Operational cheat sheet for Prometheus + Grafana + Loki. For an intro to what's installed, see [README](README.md).
 
+**On this page:** [Restart everything](#restart-everything) · [Re-apply config changes](#re-apply-config-changes) · [Drop and reinstall (data loss)](#drop-and-reinstall-data-loss) · [Bump retention](#bump-retention) · [Rotate admin password](#rotate-admin-password) · [A pod's logs aren't showing up in Grafana](#a-pods-logs-arent-showing-up-in-grafana) · [A custom-metrics target isn't being scraped](#a-custom-metrics-target-isnt-being-scraped) · [Reload a Grafana dashboard from JSON](#reload-a-grafana-dashboard-from-json) · [Quick health one-liner](#quick-health-one-liner) · [OrbStack k3s per-container metrics limitation](#orbstack-k3s-per-container-metrics-limitation)
+
 ---
 
 ## Restart everything
