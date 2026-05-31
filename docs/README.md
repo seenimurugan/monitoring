@@ -4,6 +4,8 @@ Cluster observability stack. One Grafana UI for both metrics (Prometheus) and lo
 
 Source: [`github.com/seenimurugan/monitoring`](https://github.com/seenimurugan/monitoring). Values files + deploy script live at the root of that repo.
 
+**On this page:** [Access](#access) · [Initial credentials](#initial-credentials) · [What it does](#what-it-does) · [Logs by app — the "$app dropdown" workflow](#logs-by-app--the-$app-dropdown-workflow) · [Adding metrics for a new app](#adding-metrics-for-a-new-app) · [Stack & framework](#stack--framework) · [Storage](#storage) · [See also](#see-also) · [File reference](#file-reference)
+
 ---
 
 ## Access

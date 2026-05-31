@@ -1,5 +1,7 @@
 # Monitoring — Architecture
 
+**On this page:** [Deployment diagram](#deployment-diagram) · [Components](#components) · [Namespace](#namespace) · [How metrics reach Grafana](#how-metrics-reach-grafana) · [How logs reach Grafana](#how-logs-reach-grafana) · [Storage](#storage) · [Design decisions](#design-decisions)
+
 ## Deployment diagram
 
 ```mermaid
