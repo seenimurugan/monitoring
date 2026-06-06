@@ -1,0 +1,239 @@
+---
+# Alertmanager → WhatsApp adapter
+#
+# A tiny Node.js HTTP server (script from ConfigMap) that:
+#   - Accepts Alertmanager webhook POSTs on /alert
+#   - Formats a human-readable message
+#   - Forwards to the reminders WhatsApp sidecar at /send
+#
+# WHATSAPP_TARGET  — from Secret whatsapp-alert-config (key: target_number)
+# WHATSAPP_SEND_URL — plain env (defaults to reminders sidecar FQDN)
+#
+# The Secret is NOT in this file; create it before applying:
+#   kubectl create secret generic whatsapp-alert-config \
+#     --namespace monitoring \
+#     --from-literal=target_number='+<E.164_NUMBER>'
+
+# ── ConfigMap: adapter script ─────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-whatsapp-script
+  namespace: monitoring
+  labels:
+    app: alertmanager-whatsapp
+data:
+  server.js: |
+    'use strict';
+    const http  = require('http');
+    const https = require('https');
+
+    const PORT             = parseInt(process.env.PORT || '9094', 10);
+    const WHATSAPP_SEND_URL = process.env.WHATSAPP_SEND_URL ||
+                              'http://reminders-whatsapp.homelab.svc.cluster.local:3000/send';
+    const WHATSAPP_TARGET  = process.env.WHATSAPP_TARGET;
+
+    if (!WHATSAPP_TARGET) {
+      console.error('event=startup outcome=fatal reason=WHATSAPP_TARGET_env_missing');
+      process.exit(1);
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    function formatAlert(alert) {
+      const status      = (alert.status || 'unknown').toUpperCase();
+      const alertname   = (alert.labels && alert.labels.alertname)  || 'unknown';
+      const severity    = (alert.labels && alert.labels.severity)   || '';
+      const summary     = (alert.annotations && alert.annotations.summary)     || '';
+      const description = (alert.annotations && alert.annotations.description) || '';
+      const namespace   = (alert.labels && alert.labels.namespace)  || '';
+      const pod         = (alert.labels && alert.labels.pod)        || '';
+
+      let lines = [];
+      lines.push(`*[${status}] ${alertname}*`);
+      if (severity)    lines.push(`Severity: ${severity}`);
+      if (namespace)   lines.push(`Namespace: ${namespace}`);
+      if (pod)         lines.push(`Pod: ${pod}`);
+      if (summary)     lines.push(`Summary: ${summary}`);
+      if (description) lines.push(`Details: ${description}`);
+      return lines.join('\n');
+    }
+
+    function buildMessage(body) {
+      const alerts  = Array.isArray(body.alerts) ? body.alerts : [];
+      const group   = body.groupLabels ? JSON.stringify(body.groupLabels) : '';
+      const header  = alerts.length > 1
+        ? `*Alertmanager — ${alerts.length} alerts*\n`
+        : '';
+      const parts   = alerts.map(formatAlert);
+      const footer  = group ? `\nGroup: ${group}` : '';
+      return header + parts.join('\n\n') + footer;
+    }
+
+    // ── HTTP POST helper (works for http:// and https://) ────────────────────
+
+    function post(url, payload) {
+      return new Promise((resolve, reject) => {
+        const body  = JSON.stringify(payload);
+        const u     = new URL(url);
+        const lib   = u.protocol === 'https:' ? https : http;
+        const opts  = {
+          hostname: u.hostname,
+          port:     u.port || (u.protocol === 'https:' ? 443 : 80),
+          path:     u.pathname + u.search,
+          method:   'POST',
+          headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        };
+        const req = lib.request(opts, (res) => {
+          let raw = '';
+          res.on('data', (c) => { raw += c; });
+          res.on('end', () => resolve({ status: res.statusCode, body: raw }));
+        });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+    }
+
+    // ── main server ──────────────────────────────────────────────────────────
+
+    const server = http.createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/healthz') {
+        res.writeHead(200); res.end('ok'); return;
+      }
+      if (req.method !== 'POST' || req.url !== '/alert') {
+        res.writeHead(404); res.end(); return;
+      }
+
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', async () => {
+        let body;
+        try { body = JSON.parse(raw); } catch (e) {
+          console.warn('event=alert.parse outcome=error reason=invalid_json');
+          res.writeHead(400); res.end(JSON.stringify({ error: 'invalid_json' })); return;
+        }
+
+        const alerts = Array.isArray(body.alerts) ? body.alerts : [];
+        for (const a of alerts) {
+          const alertname = (a.labels && a.labels.alertname) || 'unknown';
+          const status    = a.status || 'unknown';
+          console.log(`event=alert.received alertname=${alertname} status=${status} severity=${(a.labels && a.labels.severity) || ''}`);
+        }
+
+        const message = buildMessage(body);
+        const to      = WHATSAPP_TARGET;
+        console.log(`event=whatsapp.send.attempt to=+***REDACTED*** alertCount=${alerts.length} url=${WHATSAPP_SEND_URL}`);
+
+        let httpStatus;
+        try {
+          const r = await post(WHATSAPP_SEND_URL, { to, message });
+          httpStatus = r.status;
+          if (r.status >= 200 && r.status < 300) {
+            console.log(`event=whatsapp.send.success to=+***REDACTED*** httpStatus=${r.status}`);
+          } else if (r.status === 503) {
+            // Sidecar not ready (logged-out / QR needed). Log a clear WARN,
+            // but return 200 to Alertmanager so it stops retrying immediately.
+            // The user will re-scan QR to restore the session.
+            console.warn(`event=whatsapp.send.not_ready httpStatus=503 reason=client_not_ready action=returning_200_to_stop_alertmanager_retry`);
+          } else {
+            console.error(`event=whatsapp.send.failed httpStatus=${r.status} body=${r.body.slice(0, 200)}`);
+          }
+        } catch (err) {
+          console.error(`event=whatsapp.send.error reason=${err && err.message ? err.message : String(err)}`);
+          // Still return 200 — a network blip shouldn't cause Alertmanager to
+          // queue-and-hammer. Alertmanager will re-fire on the next group interval.
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, httpStatus }));
+      });
+    });
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`event=startup outcome=ok port=${PORT} sendUrl=${WHATSAPP_SEND_URL} target=+***REDACTED***`);
+    });
+
+---
+# ── Deployment ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-whatsapp
+  namespace: monitoring
+  labels:
+    app: alertmanager-whatsapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager-whatsapp
+  template:
+    metadata:
+      labels:
+        app: alertmanager-whatsapp
+    spec:
+      containers:
+        - name: adapter
+          image: node:22-alpine
+          command: ["node", "/app/server.js"]
+          ports:
+            - name: http
+              containerPort: 9094
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "9094"
+            - name: WHATSAPP_SEND_URL
+              value: "http://reminders-whatsapp.homelab.svc.cluster.local:3000/send"
+            - name: WHATSAPP_TARGET
+              valueFrom:
+                secretKeyRef:
+                  name: whatsapp-alert-config
+                  key: target_number
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: script
+          configMap:
+            name: alertmanager-whatsapp-script
+
+---
+# ── Service (ClusterIP) ───────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-whatsapp
+  namespace: monitoring
+  labels:
+    app: alertmanager-whatsapp
+spec:
+  selector:
+    app: alertmanager-whatsapp
+  ports:
+    - name: http
+      port: 9094
+      targetPort: http
+      protocol: TCP
+  type: ClusterIP
