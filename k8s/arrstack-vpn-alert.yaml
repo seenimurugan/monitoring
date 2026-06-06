@@ -1,0 +1,51 @@
+---
+# PrometheusRule: Arrstack VPN (gluetun) tunnel-down alert
+#
+# Metric used: kube_pod_init_container_status_ready
+# Rationale: gluetun runs as an initContainer with restartPolicy: Always
+# (native sidecar pattern). kube-state-metrics tracks native sidecars under
+# kube_pod_INIT_container_status_ready, NOT kube_pod_container_status_ready.
+# Verified live against Prometheus on 2026-06-06:
+#   promtool query instant .../api/v1/query
+#     'kube_pod_init_container_status_ready{namespace="homelab",container="gluetun"}'
+# All 5 arrstack pods (radarr, prowlarr, qbittorrent, bazarr, flaresolverr)
+# returned value=1, confirming the metric + label names are real.
+#
+# Discovery: ruleSelector={} + ruleNamespaceSelector={} → Prometheus picks up
+# ALL PrometheusRules cluster-wide. The `release: kps` label is included to
+# match convention of existing kps-managed rules (not strictly required).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: arrstack-vpn-alert
+  namespace: monitoring
+  labels:
+    release: kps
+    app: kube-prometheus-stack
+    app.kubernetes.io/part-of: kube-prometheus-stack
+spec:
+  groups:
+    - name: arrstack.vpn
+      interval: 1m
+      rules:
+        - alert: ArrstackVPNDown
+          expr: |
+            kube_pod_init_container_status_ready{
+              namespace="homelab",
+              container="gluetun",
+              pod=~"(radarr|prowlarr|qbittorrent|bazarr|flaresolverr)-.*"
+            } == 0
+          for: 5m
+          labels:
+            severity: warning
+            namespace: homelab
+          annotations:
+            summary: "Arrstack pod {{ $labels.pod }}: gluetun VPN tunnel is down"
+            description: >-
+              The gluetun VPN sidecar on pod {{ $labels.pod }} (namespace: homelab)
+              has not been Ready for more than 5 minutes. All downloads and indexer
+              searches through this pod will fail until the VPN tunnel reconnects.
+              If the current date is near 2027-04-02, the Surfshark subscription
+              may have expired — renew it and restart the affected deployment.
+              See arrstack VPN rotation docs for steps.
+            runbook_url: "https://docs.stoat-perch.ts.net/moviesda/"

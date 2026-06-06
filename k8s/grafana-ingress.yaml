@@ -1,6 +1,8 @@
 ---
 # Tailscale HTTPS Ingress for Grafana
-# Result: https://${GRAFANA_INGRESS_HOST}.${TAILNET_DOMAIN} (from any tailnet device)
+# Result: https://grafana.stoat-perch.ts.net (from any tailnet device)
+# deploy.sh runs this through envsubst — ${GRAFANA_INGRESS_HOST} and
+# ${MONITORING_NAMESPACE} are expanded from .env at apply time.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy.sh — idempotent deploy for the homelab monitoring stack
-# (Prometheus + Grafana + Alertmanager + Loki + Alloy)
+# (Prometheus + Grafana + Alertmanager + Loki + Alloy + WhatsApp adapter + alerting)
 # Usage: ./deploy.sh
 # Safe to re-run; existing Helm releases are upgraded, not replaced.
 set -euo pipefail
@@ -48,16 +48,28 @@ else
 fi
 
 # ── 5. Create / update grafana-admin-secret ───────────────────────────────────
-echo "[3/8] Ensuring grafana-admin-secret..."
+echo "[3/11] Ensuring grafana-admin-secret..."
 kubectl -n "$NS" create secret generic grafana-admin-secret \
   --from-literal=admin-user="${GRAFANA_ADMIN_USERNAME}" \
   --from-literal=admin-password="${GRAFANA_ADMIN_PASSWORD}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── 5b. Create / update telegram-alert-config ────────────────────────────────
+echo "[4/11] Ensuring telegram-alert-config..."
+kubectl -n "$NS" create secret generic telegram-alert-config \
+  --from-literal=bot_token="${ALERTMANAGER_TELEGRAM_BOT_TOKEN}" \
+  --from-literal=chat_id="${ALERTMANAGER_TELEGRAM_CHAT_ID}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# ── 5c. Create / update whatsapp-alert-config ────────────────────────────────
+echo "[5/11] Ensuring whatsapp-alert-config..."
+kubectl -n "$NS" create secret generic whatsapp-alert-config \
+  --from-literal=target_number="${ALERTMANAGER_WHATSAPP_TARGET}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # ── 6. kube-prometheus-stack (Prometheus + Grafana + Alertmanager + exporters) -
-echo "[4/8] Installing/upgrading kube-prometheus-stack..."
-# envsubst the values file so MONITORING_NAMESPACE is expanded (used in no-op
-# fields here, but keeps the pattern consistent for future additions).
+echo "[6/11] Installing/upgrading kube-prometheus-stack..."
+# envsubst expands MONITORING_NAMESPACE and ALERTMANAGER_TELEGRAM_CHAT_ID from .env.
 envsubst < "$SCRIPT_DIR/values/kube-prometheus-stack-values.yaml" > /tmp/kps-values.yaml
 helm upgrade --install kps prometheus-community/kube-prometheus-stack \
   --namespace "$NS" \
@@ -66,7 +78,7 @@ helm upgrade --install kps prometheus-community/kube-prometheus-stack \
   --wait --timeout 10m
 
 # ── 7. Loki ───────────────────────────────────────────────────────────────────
-echo "[5/8] Installing/upgrading Loki..."
+echo "[7/11] Installing/upgrading Loki..."
 helm upgrade --install loki grafana/loki \
   --namespace "$NS" \
   --version 7.0.0 \
@@ -74,16 +86,15 @@ helm upgrade --install loki grafana/loki \
   --wait --timeout 10m
 
 # ── 8. Alloy ──────────────────────────────────────────────────────────────────
-echo "[6/8] Installing/upgrading Alloy..."
-envsubst < "$SCRIPT_DIR/values/alloy-values.yaml" > /tmp/alloy-values.yaml
+echo "[8/11] Installing/upgrading Alloy..."
 helm upgrade --install alloy grafana/alloy \
   --namespace "$NS" \
   --version 1.8.2 \
-  --values /tmp/alloy-values.yaml \
+  --values "$SCRIPT_DIR/values/alloy-values.yaml" \
   --wait --timeout 5m
 
 # ── 9. k8s manifests (ingress + loki datasource) ──────────────────────────────
-echo "[7/8] Applying k8s manifests..."
+echo "[9/11] Applying k8s manifests..."
 K8S_DIR="$SCRIPT_DIR/k8s"
 for f in grafana-loki-datasource.yaml grafana-ingress.yaml; do
   echo "  → $f"
@@ -92,8 +103,15 @@ done
 # NOTE: servicemonitor-template.yaml is NOT applied here — it is a reference
 # template for app-side use. Copy it into the app's repo and apply it there.
 
-# ── 10. Rollout status ────────────────────────────────────────────────────────
-echo "[8/8] Waiting for Grafana rollout..."
+# ── 10. Alerting stack (WhatsApp adapter + Arrstack VPN PrometheusRule) ───────
+echo "[10/11] Applying alerting manifests..."
+for f in alertmanager-whatsapp-adapter.yaml arrstack-vpn-alert.yaml; do
+  echo "  → $f"
+  kubectl apply -f "$K8S_DIR/$f"
+done
+
+# ── 11. Rollout status ────────────────────────────────────────────────────────
+echo "[11/11] Waiting for Grafana rollout..."
 kubectl -n "$NS" rollout status deployment/grafana --timeout=5m
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -111,3 +129,7 @@ echo "  Other endpoints (debug port-forwards):"
 echo "    kubectl -n $NS port-forward svc/grafana 3000:80          → http://localhost:3000"
 echo "    kubectl -n $NS port-forward svc/kps-prometheus 9090:9090 → http://localhost:9090"
 echo "    kubectl -n $NS port-forward svc/loki 3100:3100           → http://localhost:3100"
+echo ""
+echo "  Alert delivery:"
+echo "    Telegram:  channel ${ALERTMANAGER_TELEGRAM_CHAT_ID} (warning-severity alerts)"
+echo "    WhatsApp:  ${ALERTMANAGER_WHATSAPP_TARGET} via reminders sidecar"
